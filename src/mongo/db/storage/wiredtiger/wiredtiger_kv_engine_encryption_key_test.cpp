@@ -147,7 +147,7 @@ private:
 
 class FakeReadVaultSecret : public ReadVaultSecret {
 public:
-    explicit FakeReadVaultSecret(FakeVaultServer& server, const VaultSecretId& id)
+    FakeReadVaultSecret(FakeVaultServer& server, const VaultSecretId& id)
         : ReadVaultSecret(id), _server(server) {}
 
 
@@ -161,7 +161,7 @@ private:
 
 class FakeSaveVaultSecret : public SaveVaultSecret {
 public:
-    explicit FakeSaveVaultSecret(FakeVaultServer& server, const std::string& secretPath)
+    FakeSaveVaultSecret(FakeVaultServer& server, const std::string& secretPath)
         : SaveVaultSecret(secretPath), _server(server) {}
 
     std::unique_ptr<KeyId> operator()(const Key& key) const override {
@@ -354,8 +354,7 @@ protected:
     }
 
     std::unique_ptr<WiredTigerKVEngine> _createWiredTigerKVEngine() {
-        auto client = _svcCtx->makeClient("opCtx");
-        auto opCtx = client->makeOperationContext();
+        auto opCtx = makeOperationContext();
         auto engine = std::make_unique<WiredTigerKVEngine>(
             opCtx.get(),
             "wiredTiger",
@@ -829,9 +828,9 @@ TEST_F(WiredTigerKVEngineEncryptionKeyKmipTest, RotationErrorIfProvidedKeyIdEqua
         "is equal to that the system is already configured with");
 }
 
-#undef ASSERT_CREATE_ENGINE_THROWS_WHAT
-#undef ASSERT_CREATE_ENGINE_THROWS_REASON_CONTAINS
 #undef ASSERT_CREATE_ENGINE_THROWS_REASON_REGEX
+#undef ASSERT_CREATE_ENGINE_THROWS_REASON_CONTAINS
+#undef ASSERT_CREATE_ENGINE_THROWS_WHAT
 
 }  // namespace
 }  // namespace mongo
