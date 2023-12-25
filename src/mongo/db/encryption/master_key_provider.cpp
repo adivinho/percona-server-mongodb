@@ -58,18 +58,30 @@ std::unique_ptr<MasterKeyProvider> MasterKeyProvider::create(const EncryptionGlo
 }
 
 KeyKeyIdPair MasterKeyProvider::_readMasterKey(const ReadKey& read, bool updateKeyIds) const {
-    auto keyKeyId = read();
-    if (!keyKeyId) {
-        KeyErrorBuilder b(
-            KeyOperationType::kRead,
-            "Cannot start. Master encryption key is absent on the key management facility. "
-            "Check configuration options.");
+    std::variant<KeyKeyIdPair, KeyEntryError> readResult = read();
+    if (readResult.index() == 1) {
+        const char* what = "";
+        switch (std::get<1>(readResult)) {
+            case KeyEntryError::kKeyDoesNotExist:
+                what =
+                    "Cannot start. Master encryption key is absent on the "
+                    "key management facility. Check configuration options.";
+                break;
+            case KeyEntryError::kKeyIsNotActive:
+                what =
+                    "Master encryption key is not in the active state "
+                    "on the key management facility.";
+                break;
+        }
+        KeyErrorBuilder b(KeyOperationType::kRead, what);
         b.append("keyManagementFacilityType", read.facilityType());
         b.append("keyIdentifier", read.keyId());
         throw b.error();
     }
+
+    KeyKeyIdPair keyKeyId = std::move(std::get<0>(readResult));
     if (updateKeyIds) {
-        _wtKeyIds.decryption = keyKeyId->keyId->clone();
+        _wtKeyIds.decryption = keyKeyId.keyId->clone();
         if (!_wtKeyIds.configured &&
             _wtKeyIds.decryption->needsSerializationToStorageEngineEncryptionOptions()) {
             _wtKeyIds.futureConfigured = _wtKeyIds.decryption->clone();
@@ -79,8 +91,8 @@ KeyKeyIdPair MasterKeyProvider::_readMasterKey(const ReadKey& read, bool updateK
                   logv2::LogOptions(_logComponent),
                   "Master encryption key has been read from the key management facility.",
                   "keyManagementFacilityType"_attr = read.facilityType(),
-                  "keyIdentifier"_attr = *keyKeyId->keyId);
-    return KeyKeyIdPair(std::move(*keyKeyId));
+                  "keyIdentifier"_attr = *keyKeyId.keyId);
+    return keyKeyId;
 }
 
 std::unique_ptr<KeyId> MasterKeyProvider::_saveMasterKey(const SaveKey& save,

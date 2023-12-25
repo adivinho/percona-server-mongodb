@@ -35,6 +35,9 @@ Copyright (C) 2023-present Percona and/or its affiliates. All rights reserved.
 #include <memory>
 #include <optional>
 #include <string>
+#include <variant>
+
+#include "mongo/db/encryption/key_entry_error.h"
 
 namespace mongo::encryption {
 class Key;
@@ -56,8 +59,44 @@ public:
                const std::string& clientCertificatePassword,
                std::chrono::milliseconds timeout);
 
-    std::string registerSymmetricKey(const Key& key);
-    std::optional<Key> getSymmetricKey(const std::string& keyId);
+    /// @brief Registers a symmetric encryption key on the KMIP server.
+    ///
+    /// @param key the key to register
+    /// @param activate whether the key should be transitioned to the `Active`
+    ///     state
+    ///
+    /// @returns the identifier of the registered key
+    ///
+    /// @throws `std::runtime_error` if the key can't be registered or activated
+    std::string registerSymmetricKey(const Key& key, bool activate = true);
+
+    /// @brief Reads a symmetric encryption key from the KMIP server.
+    ///
+    /// @param keyId the identifier of the key to be read
+    /// @param verifyState if true, verify that the key is in the `Active` state
+    ///     before reading its data from the server
+    ///
+    /// @returns The key with the specified identifier. If no such a key exists,
+    ///     `KeyEntryError::kKeyDoesNotExist` is returned. If `verifyState` is
+    ///     `true` but the key is not in the `Active` state, then the function
+    ///     returns `KeyEntryError::kKeyIsNotActive`.
+    ///
+    /// @throws `std::runtime_error` if any error happens except those listed in
+    ///     `KeyEntryError`
+    std::variant<Key, KeyEntryError> getSymmetricKey(const std::string& keyId,
+                                                     bool verifyState = true);
+
+    /// @brief Determines whether a symmetric key is in the `Active` state on
+    /// the KMIP server.
+    ///
+    /// @param keyId the identifier of the key whose state needs to be checked
+    ///
+    /// @returns an uninitialized optional if the key is in the `Active` state
+    ///     or an error code otherwise.
+    ///
+    /// @throws `std::runtime_error` if any error happens except those listed in
+    ///     `KeyEntryError`
+    std::optional<KeyEntryError> verifyKeyIsActive(const std::string& keyId);
 
 private:
     class Impl;

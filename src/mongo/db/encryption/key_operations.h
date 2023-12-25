@@ -36,9 +36,12 @@ Copyright (C) 2022-present Percona and/or its affiliates. All rights reserved.
 #include <optional>
 #include <string>
 #include <string_view>
+#include <variant>
 
 #include "mongo/db/encryption/key.h"
+#include "mongo/db/encryption/key_entry_error.h"
 #include "mongo/db/encryption/key_id.h"
+#include "mongo/util/duration.h"
 
 namespace mongo {
 class EncryptionGlobalParams;
@@ -67,8 +70,7 @@ public:
 
     /// @brief Read an encryption key from a key management facility.
     ///
-    /// @returns the copy of the key if it exists on the key management
-    ///          facility and specific identifier of that key.
+    /// @returns either the requested key and its identifier or an error code.
     ///
     /// @note In the most cases, the returned identifier is equal to the
     /// requested one, i.e. passed in the constructor of a specific
@@ -79,7 +81,7 @@ public:
     /// was the latest at the time of reading.
     ///
     /// @throws `std::runtime_error` on failure
-    virtual std::optional<KeyKeyIdPair> operator()() const = 0;
+    virtual std::variant<KeyKeyIdPair, KeyEntryError> operator()() const = 0;
 
     const char* facilityType() const noexcept {
         return keyId().facilityType();
@@ -118,12 +120,45 @@ public:
     virtual const char* facilityType() const noexcept = 0;
 };
 
+/// @brief The operation for determining whether an encryption key is in the
+/// `Active` state.
+class VerifyKeyIsActive {
+public:
+    virtual ~VerifyKeyIsActive() = default;
+    VerifyKeyIsActive() = default;
+    VerifyKeyIsActive(const VerifyKeyIsActive&) = default;
+    VerifyKeyIsActive(VerifyKeyIsActive&&) = default;
+    VerifyKeyIsActive& operator=(const VerifyKeyIsActive&) = default;
+    VerifyKeyIsActive& operator=(VerifyKeyIsActive&&) = default;
+
+    /// @brief Determines whether an encryption key is in the `Active` state.
+    ///
+    /// @note At the time of writing, only KMIP key management facility supports
+    /// the operation.
+    ///
+    /// @returns an uninitialized optional if the key is in the `Active` state
+    ///     or an error code otherwise.
+    ///
+    /// @throws `std::runtime_error` on failure
+    virtual std::optional<KeyEntryError> operator()() const = 0;
+
+    /// @brief Returns time interval in seconds with which periodic key state
+    /// verifications should be done.
+    virtual Seconds period() const = 0;
+
+    virtual const KeyId& keyId() const noexcept = 0;
+
+    const char* facilityType() const noexcept {
+        return keyId().facilityType();
+    }
+};
+
 class ReadKeyFile : public ReadKey {
 public:
     explicit ReadKeyFile(const KeyFilePath& path) : _path(path) {}
     explicit ReadKeyFile(KeyFilePath&& path) : _path(std::move(path)) {}
 
-    std::optional<KeyKeyIdPair> operator()() const override;
+    std::variant<KeyKeyIdPair, KeyEntryError> operator()() const override;
 
     const KeyId& keyId() const noexcept override {
         return _path;
@@ -142,7 +177,7 @@ public:
     explicit ReadVaultSecret(const VaultSecretId& id) : _id(id) {}
     explicit ReadVaultSecret(VaultSecretId&& id) : _id(std::move(id)) {}
 
-    std::optional<KeyKeyIdPair> operator()() const override;
+    std::variant<KeyKeyIdPair, KeyEntryError> operator()() const override;
 
     const KeyId& keyId() const noexcept override {
         return _id;
@@ -176,31 +211,54 @@ private:
 
 class ReadKmipKey : public ReadKey {
 public:
-    explicit ReadKmipKey(const KmipKeyId& id) : _id(id) {}
-    explicit ReadKmipKey(KmipKeyId&& id) : _id(std::move(id)) {}
+    ReadKmipKey(const KmipKeyId& id, bool verifyState) : _id(id), _verifyState(verifyState) {}
+    ReadKmipKey(KmipKeyId&& id, bool verifyState) : _id(std::move(id)), _verifyState(verifyState) {}
 
-    std::optional<KeyKeyIdPair> operator()() const override;
+    std::variant<KeyKeyIdPair, KeyEntryError> operator()() const override;
 
     const KeyId& keyId() const noexcept override {
         return _id;
     }
 
-    /// @note Used in the unit tests
-    const KmipKeyId& kmipKeyId() const noexcept {
-        return _id;
-    }
-
-private:
+    /// @note Allow access from subclasses to facilitate unit testing
+protected:
     KmipKeyId _id;
+    bool _verifyState;
 };
 
 class SaveKmipKey : public SaveKey {
 public:
+    explicit SaveKmipKey(bool activate) : _activate(activate) {}
     std::unique_ptr<KeyId> operator()(const Key& k) const override;
 
     const char* facilityType() const noexcept override {
         return KmipKeyId::kFacilityType;
     }
+
+    /// @note Allow access from subclasses to facilitate unit testing
+protected:
+    bool _activate;
+};
+
+class VerifyKmipKeyIsActive : public VerifyKeyIsActive {
+public:
+    VerifyKmipKeyIsActive(const KmipKeyId& id, Seconds period) : _id(id), _period(period) {}
+    VerifyKmipKeyIsActive(KmipKeyId&& id, Seconds period) : _id(std::move(id)), _period(period) {}
+
+    std::optional<KeyEntryError> operator()() const override;
+
+    Seconds period() const override {
+        return _period;
+    }
+
+    const KeyId& keyId() const noexcept override {
+        return _id;
+    }
+
+    /// @note Allow access from subclasses to facilitate unit testing
+protected:
+    KmipKeyId _id;
+    Seconds _period;
 };
 
 /// @brief Factory to produce read and save operations for a key management
@@ -257,6 +315,15 @@ public:
     ///
     /// @returns pointer to the save operation
     virtual std::unique_ptr<SaveKey> createSave(const KeyId* configured) const = 0;
+
+    /// @brief Creates the operation for determining whether an encryption key
+    /// is in the `Active` state.
+    ///
+    /// @param keyId the identifier of the key whose state requires verification
+    ///
+    /// @return the pointer to the operation or `nullptr` if such an operation
+    ///     isn't supported for a particular key management facility
+    virtual std::unique_ptr<VerifyKeyIsActive> createVerify(const KeyId& id) const = 0;
 };
 
 class KeyFileOperationFactory : public KeyOperationFactory {
@@ -271,6 +338,10 @@ public:
         return createProvidedRead();
     }
     std::unique_ptr<SaveKey> createSave(const KeyId* configured) const override;
+    std::unique_ptr<VerifyKeyIsActive> createVerify(const KeyId& id) const override {
+        (void)id;
+        return nullptr;
+    }
 
 private:
     // allow overriding to enable unit testing
@@ -299,9 +370,17 @@ public:
     std::unique_ptr<ReadKey> createProvidedRead() const override;
     std::unique_ptr<ReadKey> createRead(const KeyId* configured) const override;
     std::unique_ptr<SaveKey> createSave(const KeyId* configured) const override;
+    std::unique_ptr<VerifyKeyIsActive> createVerify(const KeyId& id) const override {
+        (void)id;
+        return nullptr;
+    }
 
 private:
     friend class detail::CreateReadImpl<VaultSecretOperationFactory>;
+
+    std::unique_ptr<ReadKey> _doCreateProvidedRead(const VaultSecretId& id) const {
+        return _doCreateRead(id);
+    }
 
     // allow overriding to enable unit testing
     virtual std::unique_ptr<ReadKey> _doCreateRead(const VaultSecretId& id) const {
@@ -320,25 +399,45 @@ private:
 class KmipKeyOperationFactory : public KeyOperationFactory,
                                 private detail::CreateReadImpl<KmipKeyOperationFactory> {
 public:
-    KmipKeyOperationFactory(bool rotateMasterKey, const std::string& providedKeyId);
+    KmipKeyOperationFactory(bool rotateMasterKey,
+                            const std::string& providedKeyId,
+                            bool activateKey,
+                            Seconds keyStatePollingPeriod);
     std::unique_ptr<ReadKey> createProvidedRead() const override;
     std::unique_ptr<ReadKey> createRead(const KeyId* configured) const override;
     std::unique_ptr<SaveKey> createSave(const KeyId* configured) const override {
         return _doCreateSave();
     }
+    std::unique_ptr<VerifyKeyIsActive> createVerify(const KeyId& id) const override;
 
 private:
     friend class detail::CreateReadImpl<KmipKeyOperationFactory>;
 
-    // allow overriding to enable unit testing
-    virtual std::unique_ptr<ReadKey> _doCreateRead(const KmipKeyId& id) const {
-        return std::make_unique<ReadKmipKey>(id);
+    std::unique_ptr<ReadKey> _doCreateProvidedRead(const KmipKeyId& id) const {
+        return _doCreateRead(id, /* verifyState = */ _activateKeys);
     }
-    virtual std::unique_ptr<SaveKey> _doCreateSave() const {
-        return std::make_unique<SaveKmipKey>();
+    std::unique_ptr<ReadKey> _doCreateRead(const KmipKeyId& id) const {
+        return _doCreateRead(id, /* verifyState = */ _activateKeys && !_rotateMasterKey);
+    }
+    std::unique_ptr<SaveKey> _doCreateSave() const {
+        return _doCreateSave(_activateKeys);
+    }
+
+    // allow overriding to enable unit testing
+    virtual std::unique_ptr<ReadKey> _doCreateRead(const KmipKeyId& id, bool verifyState) const {
+        return std::make_unique<ReadKmipKey>(id, verifyState);
+    }
+    virtual std::unique_ptr<SaveKey> _doCreateSave(bool activate) const {
+        return std::make_unique<SaveKmipKey>(activate);
+    }
+    virtual std::unique_ptr<VerifyKeyIsActive> _doCreateVerify(const KmipKeyId& id,
+                                                               Seconds period) const {
+        return std::make_unique<VerifyKmipKeyIsActive>(id, period);
     }
 
     bool _rotateMasterKey;
+    bool _activateKeys;
+    Seconds _keyStatePollingPeriod;
     std::optional<KmipKeyId> _provided;
     mutable const KmipKeyId* _configured;
 };

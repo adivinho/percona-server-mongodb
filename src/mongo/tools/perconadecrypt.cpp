@@ -221,9 +221,20 @@ encryption::Key readMasterKey() {
     auto factory = KeyOperationFactory::create(encryptionGlobalParams);
     std::unique_ptr<ReadKey> read = factory->createProvidedRead();
     std::cout << "Loading encryption key from the " << read->facilityType() << std::endl;
-    std::optional<KeyKeyIdPair> keyKeyId = (*read)();
-    return keyKeyId ? keyKeyId->key
-                    : throw std::runtime_error("No encryption key found for specified params");
+    std::variant<KeyKeyIdPair, KeyEntryError> readResult = (*read)();
+    if (readResult.index() == 0) {
+        return std::get<0>(readResult).key;
+    }
+    const char* what = "";
+    switch (std::get<1>(readResult)) {
+        case KeyEntryError::kKeyDoesNotExist:
+            what = "No encryption key found for specified params";
+            break;
+        case KeyEntryError::kKeyIsNotActive:
+            what = "The encryption key is not in the active state";
+            break;
+    }
+    throw std::runtime_error(what);
 }
 }  // namespace
 
