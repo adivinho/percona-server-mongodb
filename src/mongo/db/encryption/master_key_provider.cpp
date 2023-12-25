@@ -39,6 +39,10 @@ Copyright (C) 2022-present Percona and/or its affiliates. All rights reserved.
 #include "mongo/db/encryption/key_operations.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_options.h"
+#include "mongo/stdx/thread.h"
+#include "mongo/util/exit.h"
+#include "mongo/util/exit_code.h"
+#include "mongo/util/periodic_runner.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
@@ -110,8 +114,9 @@ std::unique_ptr<KeyId> MasterKeyProvider::_saveMasterKey(const SaveKey& save,
     return keyId;
 }
 
-Key MasterKeyProvider::readMasterKey() const {
-    return _readMasterKey(*_factory->createRead(_wtKeyIds.configured.get())).key;
+std::pair<Key, std::unique_ptr<KeyId>> MasterKeyProvider::readMasterKey() const {
+    KeyKeyIdPair keyKeyId = _readMasterKey(*_factory->createRead(_wtKeyIds.configured.get()));
+    return {keyKeyId.key, std::move(keyKeyId.keyId)};
 }
 
 std::pair<Key, std::unique_ptr<KeyId>> MasterKeyProvider::obtainMasterKey(bool saveKey) const {
@@ -133,5 +138,72 @@ std::pair<Key, std::unique_ptr<KeyId>> MasterKeyProvider::obtainMasterKey(bool s
 
 void MasterKeyProvider::saveMasterKey(const Key& key) const {
     _saveMasterKey(*_factory->createSave(_wtKeyIds.configured.get()), key);
+}
+
+namespace {
+class KeyStateMonitor {
+public:
+    KeyStateMonitor(std::shared_ptr<VerifyKeyIsActive> verify, logv2::LogComponent logComponent)
+        : _verify((invariant(verify), verify)), _logComponent(logComponent) {}
+
+    void operator()([[maybe_unused]] Client* client) const;
+
+private:
+    std::shared_ptr<VerifyKeyIsActive> _verify;
+    logv2::LogComponent _logComponent;
+};
+
+void KeyStateMonitor::operator()([[maybe_unused]] Client* client) const try {
+    std::optional<KeyEntryError> error = (*_verify)();
+    if (!error) {
+        return;
+    }
+    switch (*error) {
+        case KeyEntryError::kKeyDoesNotExist:
+            LOGV2_ERROR_OPTIONS(29121,
+                                logv2::LogOptions(_logComponent),
+                                "Master encryption key is absent on the key management facility.",
+                                "keyManagementFacilityType"_attr = _verify->facilityType(),
+                                "keyIdentifier"_attr = _verify->keyId());
+            break;
+        case KeyEntryError::kKeyIsNotActive:
+            LOGV2_ERROR_OPTIONS(29122,
+                                logv2::LogOptions(_logComponent),
+                                "Master encryption key is not in the active "
+                                "state on the key management facility.",
+                                "keyManagementFacilityType"_attr = _verify->facilityType(),
+                                "keyIdentifier"_attr = _verify->keyId());
+            break;
+    }
+    // Please note that launching a new detached thread for calling `shutdown`
+    // is essential here. The `KeyStateMonitor::operator()` is going to be
+    // called from within a particular thread associated with a `PeriodicJob`.
+    // The `shutdown` function eventually leads to the call to
+    // `PeriodicRunnerImpl::PeriodicJobImpl::stop` which joins the thread.
+    // If it were called directly, `shutdown` would result in a thread
+    // joining itself. The idea of launching a detached thread was adopted
+    // from `src/mongo/db/commands/shutdown.cpp`.
+    stdx::thread([] { shutdown(ExitCode::perconaDataAtRestEncryptionError); }).detach();
+} catch (const encryption::Error& e) {
+    // If the KMIP server is unavailable when key state verification job
+    // tries to reach it, then the `encryption::Error` exception is thrown.
+    // In that case, we just need to log the error and wait for another attempt,
+    // which will be done in `verify->period()` seconds. Please see the
+    // `registerKeyStateVerificationJob` member function below.
+    LOGV2_ERROR_OPTIONS(
+        29123, logv2::LogOptions(_logComponent), "Data-at-Rest Encryption Error", "error"_attr = e);
+}
+}  // namespace
+
+PeriodicJobAnchor MasterKeyProvider::registerKeyStateVerificationJob(PeriodicRunner& pr,
+                                                                     const KeyId& keyId) const {
+    auto verify = std::shared_ptr<VerifyKeyIsActive>(_factory->createVerify(keyId));
+    if (!verify) {
+        return PeriodicJobAnchor();
+    }
+    return pr.makeJob(PeriodicRunner::PeriodicJob("KeyStateMonitor",
+                                                  KeyStateMonitor(verify, _logComponent),
+                                                  verify->period(),
+                                                  /* isKillableByStepdown = */ false));
 }
 }  // namespace mongo::encryption
