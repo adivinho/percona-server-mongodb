@@ -218,23 +218,19 @@ int decryptGCM(const encryption::Key& masterKey,
 
 encryption::Key readMasterKey() {
     using namespace encryption;
-    auto factory = KeyOperationFactory::create(encryptionGlobalParams);
+    EncryptionGlobalParams params = encryptionGlobalParams;
+    params.kmipActivateKeys = false;
+    auto factory = KeyOperationFactory::create(params);
     std::unique_ptr<ReadKey> read = factory->createProvidedRead();
     std::cout << "Loading encryption key from the " << read->facilityType() << std::endl;
     std::variant<KeyKeyIdPair, KeyEntryError> readResult = (*read)();
     if (readResult.index() == 0) {
         return std::get<0>(readResult).key;
     }
-    const char* what = "";
-    switch (std::get<1>(readResult)) {
-        case KeyEntryError::kKeyDoesNotExist:
-            what = "No encryption key found for specified params";
-            break;
-        case KeyEntryError::kKeyIsNotActive:
-            what = "The encryption key is not in the active state";
-            break;
-    }
-    throw std::runtime_error(what);
+    // The read operation can't return `KeyEntryError::kKeyIsNotActive` because
+    // key activating (and thus key state verification) was turned off.
+    invariant(std::get<1>(readResult) == KeyEntryError::kKeyDoesNotExist);
+    throw std::runtime_error("No encryption key found for specified params");
 }
 }  // namespace
 
