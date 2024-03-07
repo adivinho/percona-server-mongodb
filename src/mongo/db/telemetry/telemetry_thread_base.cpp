@@ -96,6 +96,7 @@ void stopTelemetryThread_inlock(ServiceContext* serviceContext) {
     auto* telemetryThread = TelemetryThreadBase::get(serviceContext);
     if (telemetryThread != nullptr) {
         telemetryThread->shutdown();
+        TelemetryThreadBase::set(serviceContext, {});
     }
 }
 
@@ -120,7 +121,6 @@ void TelemetryThreadBase::set(ServiceContext* serviceCtx,
             "Tried to reset the TelemetryThread without shutting down the previous instance.");
     }
 
-    invariant(newTelemetryThread);
     telemetryThread = std::move(newTelemetryThread);
 }
 
