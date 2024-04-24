@@ -1097,9 +1097,9 @@ build_tarball(){
       CURL_LINKFLAGS=$(pkg-config libcurl --static --libs)
       export LINKFLAGS="${LINKFLAGS} ${CURL_LINKFLAGS}"
     fi
-    if [ x"${FIPSMODE}" == x1 ]; then
-        ENABLE_FIPS="--enable-fipsmode "
-    fi
+    #if [ x"${FIPSMODE}" == x1 ]; then
+    #    ENABLE_FIPS="--enable-fipsmode "
+    #fi
     if [ ${DEBUG} = 0 ]; then
         buildscripts/scons.py CC=${CC} CXX=${CXX} --disable-warnings-as-errors --release --ssl --opt=on -j${NCPU} --use-sasl-client ${ENABLE_FIPS}--wiredtiger --audit --inmemory --hotbackup CPPPATH="${INSTALLDIR}/include ${AWS_LIBS}/include" LIBPATH="${INSTALLDIR}/lib ${AWS_LIBS}/lib ${AWS_LIBS}/lib64" LINKFLAGS="${LINKFLAGS}" ${PSM_REAL_TARGETS[@]} || exit $?
     else
