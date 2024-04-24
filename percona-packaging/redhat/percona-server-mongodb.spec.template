@@ -162,9 +162,6 @@ echo ${enable_fipsmode}
 pushd $RPM_BUILD_DIR/%{src_dir}
 buildscripts/scons.py CC=${CC} CXX=${CXX} --disable-warnings-as-errors --audit --release --ssl --opt=on  \
 %{?_smp_mflags} --use-sasl-client CPPPATH=${INSTALLDIR}/include LIBPATH="${INSTALLDIR}/lib ${AWS_LIBS}/lib ${AWS_LIBS}/lib64" \
-#%if 0%{?enable_fipsmode}
-#--enable-fipsmode \
-#%endif$
 --wiredtiger --inmemory --hotbackup ${PSM_TARGETS} || exit $?
 rm -fr resmoke.ini
 popd
